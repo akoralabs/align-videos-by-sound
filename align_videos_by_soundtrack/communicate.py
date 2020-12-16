@@ -450,7 +450,7 @@ def media_to_mono_wave(
                 "%s" % output
                 ]
         #_logger.debug(cmd)
-        check_call(cmd, stderr=open(os.devnull, 'w'))
+        check_call(cmd, stderr=sys.stderr)
     return output
 
 
