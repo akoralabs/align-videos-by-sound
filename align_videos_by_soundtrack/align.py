@@ -20,6 +20,8 @@ import json
 import tempfile
 import shutil
 import logging
+import hashlib
+import json
 
 import numpy as np
 
@@ -37,6 +39,58 @@ __all__ = [
     ]
 
 _logger = logging.getLogger(__name__)
+
+# Idea: Get global offset and then snap any other offsets to that within tol.
+
+class SyncRegion:
+  def __init__(self, start, length, offset):
+    self.start = start
+    self.length = length
+    self.offset = offset
+  
+  def to_dict(self):
+    return  {
+      'start': self.start,
+      'length': self.length,
+      'offset': self.offset,
+    }
+
+def stitch_sync_regions(sync_regions, tolerance=0.25):
+  curr_region = sync_regions[0]
+  result = [curr_region]
+  for i in range(1, len(sync_regions)):
+    next_region = sync_regions[i]
+
+    # Compute the difference between region length and the change in offset.
+    region_delta = (next_region.offset - curr_region.offset) - curr_region.length
+
+    # If the difference is within the tolerance we can stitch together.
+    if abs(region_delta) < tolerance:
+      curr_region.length += next_region.length
+      continue
+    
+    # If the difference is positive, theres a sync gap so we create a new region.
+    if region_delta > 0:
+      curr_region = next_region
+      result.append(curr_region)
+      continue
+
+    # Otherwise we need to compute a midpoint for the split.
+    half_overlap = abs(region_delta / 2)
+
+    # Current region simply gets truncated.
+    curr_region.length -= half_overlap
+
+    # New region is both truncated and shifted.
+    next_region = SyncRegion(
+        next_region.start + half_overlap,
+        next_region.length - half_overlap,
+        next_region.offset + half_overlap
+    )
+    curr_region = next_region
+    result.append(curr_region)
+
+  return result
 
 
 class _FreqTransSummarizer(object):
@@ -103,7 +157,7 @@ class _FreqTransSummarizer(object):
         result = self._summarize(raw_audio)
         del raw_audio
         return rate, result
-
+  
     def _extract_audio(self, video_file, duration):
         """
         Extract audio from video file, save as wav auido file
@@ -117,9 +171,10 @@ class _FreqTransSummarizer(object):
             sample_rate=self._params.sample_rate,
             afilter=self._params.afilter)
 
-    def summarize_audiotrack(self, media):
+    def summarize_audiotrack(self, media, chunks=1):
         _logger.info("for '%s' begin", os.path.basename(media))
         exaud_args = dict(video_file=media, duration=self._params.max_misalignment)
+
         # First, try getting from cache.
         for_cache = dict(exaud_args)
         for_cache.update(self._params.__dict__)
@@ -136,10 +191,21 @@ class _FreqTransSummarizer(object):
         _logger.info("extracting audio tracks for '%s' begin", os.path.basename(media))
         wavfile = self._extract_audio(**exaud_args)
         _logger.info("extracting audio tracks for '%s' end", os.path.basename(media))
-        rate, ft_dict = self._summarize_wav(wavfile)
-        _cache.set("_align", ck, (rate, ft_dict))
+        # TODO: We could potentially implement multi-sync cache here, but
+        # its likely pointless since we rarely re-run the same files.
+        # rate, ft_dict = self._summarize_wav(wavfile)
+        # _cache.set("_align", ck, (rate, ft_dict))
         _logger.info("for '%s' end", os.path.basename(media))
-        return ft_dict
+
+        # Parse the WAV and chunk samples. Build an FFT dictionary for each
+        # chunk separately.
+        raw_audio, rate = communicate.read_audio(wavfile)
+        chunksize = len(raw_audio) / chunks
+        ft_dicts = []
+        for i in range(chunks):
+          ft_dicts.append(self._summarize(raw_audio[i*chunksize:(i+1)*chunksize]))
+        del raw_audio
+        return ft_dicts, float(chunksize) / rate
 
     def find_delay(
         self,
@@ -167,6 +233,7 @@ class _FreqTransSummarizer(object):
                     maxcond_ok = math.isnan(max_delay) or delta_t <= max_delay
                     if mincond_ok and maxcond_ok:
                         t_diffs[delta_t] += 1
+
         try:
             return self._x_to_secs(
                 sorted(list(t_diffs.items()), key=lambda x: -x[1])[0][0])
@@ -208,57 +275,24 @@ class SyncDetector(object):
         """
         Find time delays between video files
         """
-        def _each(idx):
-            return self._impl.summarize_audiotrack(files[idx])
-        #
-        ftds = {i: _each(i) for i in range(len(files))}
-        _result1, _result2 = {}, {}
-        for kdm_key in known_delay_map.keys():
-            kdm = known_delay_map[kdm_key]
-            ft = os.path.abspath(kdm_key)
-            fb = os.path.abspath(kdm["base"])
-            it_all = [i for i, f in enumerate(files) if f == ft]
-            ib_all = [i for i, f in enumerate(files) if f == fb]
-            for it in it_all:
-                for ib in ib_all:
-                    _result1[(ib, it)] = -self._impl.find_delay(
-                        ftds[ib], ftds[it],
-                        kdm.get("min", float('nan')), kdm.get("max", float('nan')))
-        #
-        _result2[(0, 0)] = 0.0
-        for i in range(len(files) - 1):
-            if (0, i + 1) in _result1:
-                _result2[(0, i + 1)] = _result1[(0, i + 1)]
-            elif (i + 1, 0) in _result1:
-                _result2[(0, i + 1)] = -_result1[(i + 1, 0)]
-            else:
-                _result2[(0, i + 1)] = -self._impl.find_delay(ftds[0], ftds[i + 1])
-        #        [0, 1], [0, 2], [0, 3]
-        # known: [1, 2]
-        # _______________^^^^^^[0, 2] must be calculated by [0, 1], and [1, 2]
-        # 
-        # known: [1, 2], [2, 3]
-        # _______________^^^^^^[0, 2] must be calculated by [0, 1], and [1, 2]
-        # _______________^^^^^^^^[0, 3] must be calculated by [0, 2], and [2, 3]
-        for ib, it in sorted(_result1.keys()):
-            for i in range(len(files) - 1):
-                if it == i + 1 and (0, i + 1) not in _result1 and (i + 1, 0) not in _result1:
-                    if files[0] != files[it]:
-                        _result2[(0, it)] = _result2[(0, ib)] - _result1[(ib, it)]
-                elif ib == i + 1 and (0, i + 1) not in _result1 and (i + 1, 0) not in _result1:
-                    if files[0] != files[ib]:
-                        _result2[(0, ib)] = _result2[(0, it)] + _result1[(ib, it)]
+        assert len(files) == 2, "New logic only supports two files exactly."
+        orig_file, sample_file = files
+        freqs_dicts_orig, chunk_seconds = self._impl.summarize_audiotrack(orig_file, chunks=self._impl._params.multisync_chunks)
+        freqs_dict_sample = self._impl.summarize_audiotrack(sample_file)[0][0]
+        
+        # Note - known delay map ignored here for simplicity.
 
-        # build result
-        result = np.array([_result2[k] for k in sorted(_result2.keys())])
-        pad_pre = result - result.min()
-        _logger.debug(
-            list(sorted(zip(
-                    map(os.path.basename, files),
-                    [communicate.duration_to_hhmmss(pp) for pp in pad_pre]))))  #
-        trim_pre = -(pad_pre - pad_pre.max())
-        #
-        return pad_pre, trim_pre
+        # Construct set of sync regions.
+        sync_regions = []
+        for i, freqs_dict in enumerate(freqs_dicts_orig):
+          delay = self._impl.find_delay(
+              freqs_dict,
+              freqs_dict_sample)
+          sync_regions.append(SyncRegion(i * chunk_seconds, chunk_seconds, delay))
+        
+        # Stitch them togther.
+        final_regions = stitch_sync_regions(sync_regions, tolerance=self._impl._params.multisync_merge_tolerance)
+        return map(lambda r: r.to_dict(), final_regions)
 
     def get_media_info(self, files):
         """
@@ -281,28 +315,7 @@ class SyncDetector(object):
         Find time delays between video files
         """
         files = check_and_decode_filenames(files)
-        pad_pre, trim_pre = self._align(
-            files, known_delay_map)
-        #
-        infos = self.get_media_info(files)
-        orig_dur = np.array([inf["duration"] for inf in infos])
-        strms_info = [
-            (inf["streams"], inf["streams_summary"]) for inf in infos]
-        pad_post = list(
-            (pad_pre + orig_dur).max() - (pad_pre + orig_dur))
-        trim_post = list(
-            (orig_dur - trim_pre) - (orig_dur - trim_pre).min())
-        #
-        return [{
-                "trim": trim_pre[i],
-                "pad": pad_pre[i],
-                "orig_duration": orig_dur[i],
-                "trim_post": trim_post[i],
-                "pad_post": pad_post[i],
-                "orig_streams": strms_info[i][0],
-                "orig_streams_summary": strms_info[i][1],
-                }
-                for i in range(len(files))]
+        return self._align(files, known_delay_map)
 
     @staticmethod
     def summarize_stream_infos(result_from_align):
@@ -380,23 +393,7 @@ It is possible to pass any media that ffmpeg can handle.',)
         result = det.align(
             file_specs,
             known_delay_map=known_delay_map)
-    if args.json:
-        print(json.dumps(
-                {'edit_list': list(zip(file_specs, result))}, indent=4, sort_keys=True))
-    else:
-        report = []
-        for i, path in enumerate(file_specs):
-            if not (result[i]["trim"] > 0):
-                continue
-            report.append(
-                """Result: The beginning of '%s' needs to be trimmed off %.4f seconds \
-(or to be added %.4f seconds padding) for all files to be in sync""" % (
-                    path, result[i]["trim"], result[i]["pad"]))
-        if report:
-            print("\n".join(report))
-        else:
-            print("files are in sync already")
-
+    print(json.dumps(result, indent=4, sort_keys=True))
 
 if __name__ == "__main__":
     main()

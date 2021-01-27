@@ -86,6 +86,14 @@ class SyncDetectorSummarizerParams(object):
 
         The same attention as "box_height" holds. Again, the full
         range is (fft_bin_size - overlap) / 2.
+    
+    * multisync_chunks:
+        The number of chunks to split the first file into when performing
+        multi-sync. Default 10.
+    
+    * multisync_merge_tolerance:
+        The max difference in seconds sync regions can be at in order to be
+        merged together. Default 0.25.
     """
     def __init__(self, **kwargs):
         self.sample_rate = kwargs.get("sample_rate", 48000)
@@ -99,7 +107,8 @@ class SyncDetectorSummarizerParams(object):
         self.afilter = kwargs.get("afilter", "")
 
         max_misalignment = communicate.parse_time(
-            kwargs.get("max_misalignment", 1800))
+            # 3 hours.
+            kwargs.get("max_misalignment", 10800))
         if max_misalignment:
             # max_misalignment only cuts out the media. After cutting out,
             # we need to decide how much to investigate, If there really is
@@ -116,6 +125,8 @@ class SyncDetectorSummarizerParams(object):
 
         self.lowcut = kwargs.get("lowcut")
         self.highcut = kwargs.get("highcut")
+        self.multisync_chunks = kwargs.get("multisync_chunks", 10)
+        self.multisync_merge_tolerance = kwargs.get("multisync_merge_tolerance", 0.25)
 
     @staticmethod
     def from_json(s):
@@ -131,4 +142,3 @@ class SyncDetectorSummarizerParams(object):
 if __name__ == "__main__":
     import doctest
     doctest.testmod()
-
