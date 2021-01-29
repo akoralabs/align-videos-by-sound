@@ -200,12 +200,13 @@ class _FreqTransSummarizer(object):
         # Parse the WAV and chunk samples. Build an FFT dictionary for each
         # chunk separately.
         raw_audio, rate = communicate.read_audio(wavfile)
-        chunksize = len(raw_audio) / chunks
+        raw_audio_len = len(raw_audio)
+        chunksize = raw_audio_len / chunks
         ft_dicts = []
         for i in range(chunks):
           ft_dicts.append(self._summarize(raw_audio[i*chunksize:(i+1)*chunksize]))
         del raw_audio
-        return ft_dicts, float(chunksize) / rate
+        return ft_dicts, raw_audio_len / rate
 
     def find_delay(
         self,
@@ -277,22 +278,28 @@ class SyncDetector(object):
         """
         assert len(files) == 2, "New logic only supports two files exactly."
         orig_file, sample_file = files
-        freqs_dicts_orig, chunk_seconds = self._impl.summarize_audiotrack(orig_file, chunks=self._impl._params.multisync_chunks)
-        freqs_dict_sample = self._impl.summarize_audiotrack(sample_file)[0][0]
+        chunks = self._impl._params.multisync_chunks
+        freqs_dicts_orig, orig_length_seconds = self._impl.summarize_audiotrack(orig_file, chunks=chunks)
+        freqs_dicts_sample, sample_length_seconds = self._impl.summarize_audiotrack(sample_file)
         
         # Note - known delay map ignored here for simplicity.
 
         # Construct set of sync regions.
         sync_regions = []
+        chunk_seconds = orig_length_seconds / chunks
         for i, freqs_dict in enumerate(freqs_dicts_orig):
           delay = self._impl.find_delay(
               freqs_dict,
-              freqs_dict_sample)
+              freqs_dicts_sample[0])
           sync_regions.append(SyncRegion(i * chunk_seconds, chunk_seconds, delay))
         
         # Stitch them togther.
         final_regions = stitch_sync_regions(sync_regions, tolerance=self._impl._params.multisync_merge_tolerance)
-        return map(lambda r: r.to_dict(), final_regions)
+        return {
+          'regions': map(lambda r: r.to_dict(), final_regions),
+          'orig_length': orig_length_seconds,
+          'sample_length': sample_length_seconds,
+        }
 
     def get_media_info(self, files):
         """
