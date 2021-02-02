@@ -78,6 +78,12 @@ def stitch_sync_regions(sync_regions, tolerance=0.25):
     # Otherwise we need to compute a midpoint for the split.
     half_overlap = abs(region_delta / 2)
 
+    # If the overlap is before the clip we just have to discard it, which also
+    # means the syncing is likely completely off.
+    if curr_region.length - half_overlap < 0:
+      print "Skipping segment, likely alignment error"
+      continue
+
     # Current region simply gets truncated.
     curr_region.length -= half_overlap
 
@@ -292,6 +298,11 @@ class SyncDetector(object):
               freqs_dict,
               freqs_dicts_sample[0])
           sync_regions.append(SyncRegion(i * chunk_seconds, chunk_seconds, delay))
+        
+        # dbg = map(lambda r: r.to_dict(), sync_regions)
+        # print "Before stitching"
+        # print(json.dumps(dbg, indent=4, sort_keys=True))
+
         
         # Stitch them togther.
         final_regions = stitch_sync_regions(sync_regions, tolerance=self._impl._params.multisync_merge_tolerance)
