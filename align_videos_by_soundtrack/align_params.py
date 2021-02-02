@@ -89,7 +89,7 @@ class SyncDetectorSummarizerParams(object):
     
     * multisync_chunks:
         The number of chunks to split the first file into when performing
-        multi-sync. Default 10.
+        multi-sync. Default 1.
     
     * multisync_merge_tolerance:
         The max difference in seconds sync regions can be at in order to be
@@ -125,7 +125,7 @@ class SyncDetectorSummarizerParams(object):
 
         self.lowcut = kwargs.get("lowcut")
         self.highcut = kwargs.get("highcut")
-        self.multisync_chunks = kwargs.get("multisync_chunks", 10)
+        self.multisync_chunks = kwargs.get("multisync_chunks", 1)
         self.multisync_merge_tolerance = kwargs.get("multisync_merge_tolerance", 0.25)
 
     @staticmethod
